@@ -1,0 +1,1161 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+    LayoutDashboard,
+    Users,
+    Briefcase,
+    CheckSquare,
+    Plus,
+    Trash2,
+    Edit,
+    MessageCircle,
+    DollarSign,
+    Calendar,
+    LogOut,
+    ChevronRight,
+    FileText,
+    Search,
+    X
+} from 'lucide-react';
+
+// --- FIREBASE IMPORTS ---
+import { initializeApp } from "firebase/app";
+import {
+    getAuth,
+    signInAnonymously,
+    signInWithCustomToken,
+    onAuthStateChanged,
+    signOut
+} from "firebase/auth";
+import {
+    getFirestore,
+    collection,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    doc,
+    onSnapshot,
+    serverTimestamp,
+    query,
+    orderBy,
+    enableIndexedDbPersistence
+} from "firebase/firestore";
+
+// --- FIREBASE CONFIGURATION ---
+const userFirebaseConfig = {
+    apiKey: "AIzaSyAeKM8Tn1ikC1n9PcDL6_BriOa3Zk02iy0",
+    authDomain: "meus-projetos-2dc3c.firebaseapp.com",
+    projectId: "meus-projetos-2dc3c",
+    storageBucket: "meus-projetos-2dc3c.firebasestorage.app",
+    messagingSenderId: "1021041558434",
+    appId: "1:1021041558434:web:fa596b36680fab1719a8fb"
+};
+
+const firebaseConfig = typeof __firebase_config !== 'undefined'
+    ? JSON.parse(__firebase_config)
+    : userFirebaseConfig;
+
+// Inicialização Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'meus-projetos-default';
+
+// Enable Offline Persistence
+enableIndexedDbPersistence(db).catch((err) => {
+    if (err.code == 'failed-precondition') {
+        console.warn('Persistence failed: Multiple tabs open');
+    } else if (err.code == 'unimplemented') {
+        console.warn('Persistence failed: Browser not supported');
+    }
+});
+
+// --- UTILS ---
+const formatCurrency = (value) => {
+    return new Intl.NumberFormat('pt-BR', {
+        style: 'currency',
+        currency: 'BRL'
+    }).format(value);
+};
+
+const formatDate = (dateString) => {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    return new Intl.DateTimeFormat('pt-BR').format(date);
+};
+
+const getStatusColor = (status) => {
+    switch (status) {
+        case 'Ativo': return 'bg-green-100 text-green-800';
+        case 'Pendente': return 'bg-yellow-100 text-yellow-800';
+        case 'Concluído': return 'bg-blue-100 text-blue-800';
+        case 'Atrasado': return 'bg-red-100 text-red-800';
+        default: return 'bg-gray-100 text-gray-800';
+    }
+};
+
+// --- COMPONENTE PRINCIPAL ---
+export default function App() {
+    const [user, setUser] = useState(null);
+    const [view, setView] = useState('dashboard');
+    const [clients, setClients] = useState([]);
+    const [projects, setProjects] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+    // Modais e Form States
+    const [isClientModalOpen, setIsClientModalOpen] = useState(false);
+    const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+
+    const [formData, setFormData] = useState({});
+    const [selectedProject, setSelectedProject] = useState(null);
+
+    // --- AUTHENTICATION ---
+    useEffect(() => {
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Erro na autenticação:", error);
+            }
+        };
+        initAuth();
+
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+            setLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // --- ONLINE STATUS ---
+    useEffect(() => {
+        const handleStatusChange = () => setIsOnline(navigator.onLine);
+        window.addEventListener('online', handleStatusChange);
+        window.addEventListener('offline', handleStatusChange);
+        return () => {
+            window.removeEventListener('online', handleStatusChange);
+            window.removeEventListener('offline', handleStatusChange);
+        };
+    }, []);
+
+    // --- DATA FETCHING ---
+    useEffect(() => {
+        if (!user) return;
+
+        // Clientes
+        const clientsQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'clients'), orderBy('createdAt', 'desc'));
+        const unsubClients = onSnapshot(clientsQuery, (snapshot) => {
+            const clientsList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setClients(clientsList);
+        }, (error) => console.error("Erro ao buscar clientes:", error));
+
+        // Projetos
+        const projectsQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'projects'), orderBy('updatedAt', 'desc'));
+        const unsubProjects = onSnapshot(projectsQuery, (snapshot) => {
+            const projectsList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setProjects(projectsList);
+        }, (error) => console.error("Erro ao buscar projetos:", error));
+
+        return () => {
+            unsubClients();
+            unsubProjects();
+        };
+    }, [user]);
+
+    // --- ACTIONS ---
+
+    const handleSaveClient = async (e) => {
+        e.preventDefault();
+        if (!user) return;
+        try {
+            // FIX: Garantir que nenhum campo seja undefined
+            const clientData = {
+                name: formData.name || '',
+                phone: formData.phone || '',
+                email: formData.email || '',
+                company: formData.company || '',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp()
+            };
+
+            if (formData.id) {
+                // Remove createdAt na atualização para não sobrescrever
+                const { createdAt, ...updateData } = clientData;
+                await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'clients', formData.id), updateData);
+            } else {
+                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'clients'), clientData);
+            }
+            setIsClientModalOpen(false);
+            setFormData({});
+        } catch (error) {
+            console.error("Erro ao salvar cliente:", error);
+            alert("Erro ao salvar. Tente novamente.");
+        }
+    };
+
+    const handleDeleteClient = async (id) => {
+        if (!confirm("Tem certeza? Isso pode afetar projetos vinculados.")) return;
+        if (!user) return;
+        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'clients', id));
+    };
+
+    const handleSaveProject = async (e) => {
+        e.preventDefault();
+        if (!user) return;
+        try {
+            const client = clients.find(c => c.id === formData.clientId);
+
+            // FIX: Garantir valores padrão para evitar undefined
+            const projectData = {
+                name: formData.name || '',
+                clientId: formData.clientId || '',
+                clientName: client ? client.name : 'Desconhecido',
+                clientPhone: client ? client.phone : '',
+                value: parseFloat(formData.value) || 0,
+                type: formData.type || 'mensal',
+                dueDate: formData.dueDate || '',
+                status: formData.status || 'Ativo',
+                description: formData.description || '',
+                tasks: formData.tasks || [],
+                updatedAt: serverTimestamp()
+            };
+
+            if (formData.id) {
+                await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', formData.id), projectData);
+            } else {
+                projectData.createdAt = serverTimestamp();
+                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'projects'), projectData);
+            }
+            setIsProjectModalOpen(false);
+            setFormData({});
+        } catch (error) {
+            console.error("Erro ao salvar projeto:", error);
+            alert("Erro ao salvar projeto. Verifique os dados.");
+        }
+    };
+
+    const handleDeleteProject = async (id) => {
+        if (!confirm("Apagar este projeto?")) return;
+        if (!user) return;
+        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', id));
+    };
+
+    const handleTaskToggle = async (project, taskIndex) => {
+        const newTasks = [...project.tasks];
+        newTasks[taskIndex].done = !newTasks[taskIndex].done;
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id), {
+            tasks: newTasks
+        });
+    };
+
+    const handleAddTask = async (project, taskDesc) => {
+        if (!taskDesc.trim()) return;
+        const newTasks = [...(project.tasks || []), { desc: taskDesc, done: false }];
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id), {
+            tasks: newTasks
+        });
+    };
+
+    const handleSendWhatsApp = (project) => {
+        const phone = project.clientPhone.replace(/\D/g, '');
+        let message = `Olá, ${project.clientName}! Tudo bem? 🚀\n\n`;
+        message += `Estou passando para enviar a nota/fatura referente ao projeto *${project.name}*.\n`;
+        message += `Valor: *${formatCurrency(project.value)}* (${project.type === 'mensal' ? 'Mensalidade' : 'Pagamento Único'})\n`;
+        message += `Vencimento: ${formatDate(project.dueDate)}\n\n`;
+        message += `Status do Projeto: ${project.status}\n`;
+
+        const pendingTasks = project.tasks?.filter(t => !t.done).length || 0;
+        if (pendingTasks > 0) {
+            message += `\nLembrete: Ainda temos ${pendingTasks} tarefas pendentes que estamos finalizando.`;
+        } else {
+            message += `\nTodas as tarefas estão em dia! ✅`;
+        }
+
+        message += `\n\nQualquer dúvida estou à disposição!`;
+        const url = `https://wa.me/55${phone}?text=${encodeURIComponent(message)}`;
+        window.open(url, '_blank');
+    };
+
+    // --- STATS ---
+    const stats = useMemo(() => {
+        const totalProjects = projects.length;
+        const activeProjects = projects.filter(p => p.status === 'Ativo').length;
+        const mrr = projects
+            .filter(p => p.type === 'mensal' && p.status === 'Ativo')
+            .reduce((acc, curr) => acc + (parseFloat(curr.value) || 0), 0);
+        const totalReceived = projects.reduce((acc, curr) => acc + (curr.totalPaid || 0), 0);
+        const totalTasks = projects.reduce((acc, curr) => acc + (curr.tasks?.length || 0), 0);
+        const pendingTasks = projects.reduce((acc, curr) => acc + (curr.tasks?.filter(t => !t.done).length || 0), 0);
+
+        return { totalProjects, activeProjects, mrr, totalReceived, totalTasks, pendingTasks };
+    }, [projects]);
+
+
+    // --- RENDER ---
+    if (loading) return (
+        <div className="h-screen flex items-center justify-center bg-slate-950 text-indigo-500">
+            <div className="flex flex-col items-center gap-4">
+                <div className="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+                <div className="text-slate-400 font-medium animate-pulse">Carregando ArcDev...</div>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="flex h-screen bg-slate-950 font-sans text-slate-100 overflow-hidden selection:bg-indigo-500/30">
+
+            {/* SIDEBAR DESKTOP */}
+            <aside className="w-72 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800 flex flex-col shadow-2xl z-20 hidden md:flex relative overflow-hidden">
+                {/* Decorative background blur */}
+                <div className="absolute top-0 left-0 w-full h-64 bg-indigo-600/10 blur-[80px] pointer-events-none"></div>
+
+                <div className="p-8 border-b border-slate-800/50 relative z-10">
+                    <div className="flex items-center gap-3 text-white font-bold text-2xl tracking-tight">
+                        <div className="p-2.5 bg-gradient-to-br from-indigo-600 to-violet-600 rounded-xl shadow-lg shadow-indigo-500/20">
+                            <Briefcase size={22} className="text-white" />
+                        </div>
+                        ArcDev
+                    </div>
+                    <div className="mt-2 text-xs font-medium text-slate-500 uppercase tracking-widest pl-1">Management</div>
+                </div>
+
+                <nav className="flex-1 p-6 space-y-2 overflow-y-auto relative z-10">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2">Menu Principal</div>
+                    <NavButton active={view === 'dashboard'} onClick={() => setView('dashboard')} icon={<LayoutDashboard size={20} />} label="Visão Geral" />
+                    <NavButton active={view === 'projects'} onClick={() => setView('projects')} icon={<CheckSquare size={20} />} label="Projetos" />
+                    <NavButton active={view === 'clients'} onClick={() => setView('clients')} icon={<Users size={20} />} label="Clientes" />
+
+                    <div className="mt-8 text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2">Financeiro</div>
+                    <NavButton active={view === 'financials'} onClick={() => alert('Em breve')} icon={<DollarSign size={20} />} label="Fluxo de Caixa" />
+                </nav>
+
+                <div className="p-6 border-t border-slate-800/50 relative z-10">
+                    <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50 mb-4">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white font-bold shadow-lg">
+                                A
+                            </div>
+                            <div className="overflow-hidden">
+                                <div className="text-sm font-bold text-white truncate">Admin User</div>
+                                <div className="text-xs text-indigo-400 truncate">ArcDev Studio</div>
+                            </div>
+                        </div>
+                    </div>
+                    <button onClick={() => auth.signOut()} className="flex items-center gap-2 text-slate-400 hover:text-red-400 text-sm hover:bg-red-500/10 px-4 py-3 rounded-xl w-full transition-all duration-200 group">
+                        <LogOut size={18} className="group-hover:-translate-x-1 transition-transform" /> Sair do Sistema
+                    </button>
+                </div>
+            </aside>
+
+            {/* MOBILE HEADER */}
+            <div className="md:hidden fixed top-0 w-full bg-slate-900/90 backdrop-blur-md border-b border-slate-800 z-40 px-4 py-3 flex justify-between items-center shadow-lg">
+                <div className="font-bold flex items-center gap-2 text-white">
+                    <div className="p-1.5 bg-gradient-to-br from-indigo-600 to-violet-600 rounded-lg">
+                        <Briefcase size={18} />
+                    </div>
+                    ArcDev
+                </div>
+                {!isOnline && (
+                    <div className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20 animate-pulse">
+                        Offline
+                    </div>
+                )}
+                <div className="flex gap-1 bg-slate-800/80 rounded-lg p-1 border border-slate-700">
+                    <MobileNavButton active={view === 'dashboard'} onClick={() => setView('dashboard')} icon={<LayoutDashboard size={18} />} />
+                    <MobileNavButton active={view === 'projects'} onClick={() => setView('projects')} icon={<CheckSquare size={18} />} />
+                    <MobileNavButton active={view === 'clients'} onClick={() => setView('clients')} icon={<Users size={18} />} />
+                </div>
+            </div>
+
+            {/* MAIN CONTENT */}
+            <main className="flex-1 overflow-y-auto pt-20 md:pt-0 p-4 md:p-10 bg-slate-950 relative scroll-smooth">
+                {/* Background Gradients */}
+                <div className="absolute top-0 left-0 w-full h-96 bg-indigo-900/20 blur-[120px] pointer-events-none"></div>
+                <div className="absolute bottom-0 right-0 w-96 h-96 bg-violet-900/10 blur-[100px] pointer-events-none"></div>
+
+                <div className="relative z-10 max-w-7xl mx-auto">
+
+                    {/* VIEW: DASHBOARD */}
+                    {view === 'dashboard' && (
+                        <div className="space-y-8 pb-20 md:pb-0">
+                            <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                                <div>
+                                    <h1 className="text-3xl md:text-4xl font-bold text-white tracking-tight mb-2">Visão Geral</h1>
+                                    <p className="text-slate-400">Bem-vindo de volta ao painel de controle ArcDev.</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {!isOnline && (
+                                        <div className="flex items-center gap-2 text-sm font-bold text-amber-400 bg-amber-500/10 px-4 py-2 rounded-full border border-amber-500/20">
+                                            <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></div>
+                                            Modo Offline
+                                        </div>
+                                    )}
+                                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-slate-900/50 px-4 py-2 rounded-full border border-slate-800">
+                                        <Calendar size={14} />
+                                        {new Date().toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                                    </div>
+                                </div>
+                            </header>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+                                <StatCard
+                                    title="Receita Mensal (MRR)"
+                                    value={formatCurrency(stats.mrr)}
+                                    icon={<DollarSign className="text-emerald-400" size={24} />}
+                                    trend="+12% este mês"
+                                    color="from-emerald-500/10 to-emerald-500/5 border-emerald-500/20"
+                                    iconBg="bg-emerald-500/20"
+                                />
+                                <StatCard
+                                    title="Projetos Ativos"
+                                    value={stats.activeProjects}
+                                    icon={<Briefcase className="text-blue-400" size={24} />}
+                                    trend="+2 novos"
+                                    color="from-blue-500/10 to-blue-500/5 border-blue-500/20"
+                                    iconBg="bg-blue-500/20"
+                                />
+                                <StatCard
+                                    title="Tarefas Pendentes"
+                                    value={stats.pendingTasks}
+                                    icon={<CheckSquare className="text-amber-400" size={24} />}
+                                    trend="Atenção necessária"
+                                    color="from-amber-500/10 to-amber-500/5 border-amber-500/20"
+                                    iconBg="bg-amber-500/20"
+                                />
+                                <StatCard
+                                    title="Total Recebido"
+                                    value={formatCurrency(stats.totalReceived)}
+                                    icon={<DollarSign className="text-violet-400" size={24} />}
+                                    trend="Acumulado"
+                                    color="from-violet-500/10 to-violet-500/5 border-violet-500/20"
+                                    iconBg="bg-violet-500/20"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8">
+                                <div className="lg:col-span-2 bg-slate-900/50 backdrop-blur-sm p-6 md:p-8 rounded-3xl border border-slate-800 shadow-xl">
+                                    <div className="flex items-center justify-between mb-6">
+                                        <h2 className="text-xl font-bold text-white flex items-center gap-3">
+                                            <div className="p-2 bg-indigo-500/10 rounded-lg text-indigo-400">
+                                                <Calendar size={20} />
+                                            </div>
+                                            Próximos Vencimentos
+                                        </h2>
+                                        <button className="text-sm text-indigo-400 hover:text-indigo-300 font-medium transition-colors">Ver todos</button>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {projects
+                                            .filter(p => p.status === 'Ativo')
+                                            .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+                                            .slice(0, 5)
+                                            .map(project => (
+                                                <div key={project.id} className="group flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-slate-800/30 hover:bg-slate-800/60 rounded-2xl border border-slate-700/50 hover:border-indigo-500/30 transition-all duration-300">
+                                                    <div className="flex items-center gap-4 mb-3 sm:mb-0">
+                                                        <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 font-bold text-sm border border-slate-600">
+                                                            {project.clientName.charAt(0)}
+                                                        </div>
+                                                        <div>
+                                                            <div className="font-bold text-slate-200 group-hover:text-white transition-colors">{project.name}</div>
+                                                            <div className="text-sm text-slate-500">{project.clientName}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center justify-between sm:justify-end gap-6 pl-14 sm:pl-0">
+                                                        <div className="text-right">
+                                                            <div className="text-xs text-slate-500 uppercase font-bold tracking-wider">Valor</div>
+                                                            <div className="font-mono font-bold text-slate-300">{formatCurrency(project.value)}</div>
+                                                        </div>
+                                                        <div className="text-right min-w-[80px]">
+                                                            <div className="text-xs text-slate-500 uppercase font-bold tracking-wider">Vence em</div>
+                                                            <div className="text-sm font-bold text-rose-400 bg-rose-500/10 px-2 py-1 rounded-lg inline-block mt-1">
+                                                                {formatDate(project.dueDate)}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        {projects.filter(p => p.status === 'Ativo').length === 0 && (
+                                            <div className="text-center text-slate-500 py-12 bg-slate-800/20 rounded-2xl border border-dashed border-slate-700">
+                                                <div className="mb-2">🎉</div>
+                                                Nenhum projeto ativo com vencimento próximo.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-900/50 backdrop-blur-sm p-6 md:p-8 rounded-3xl border border-slate-800 shadow-xl flex flex-col">
+                                    <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-3">
+                                        <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400">
+                                            <MessageCircle size={20} />
+                                        </div>
+                                        Ações Rápidas
+                                    </h2>
+                                    <div className="grid grid-cols-1 gap-4 flex-1">
+                                        <button
+                                            onClick={() => { setFormData({}); setIsProjectModalOpen(true); }}
+                                            className="group relative p-6 bg-gradient-to-br from-indigo-600 to-violet-600 rounded-2xl shadow-lg shadow-indigo-900/20 hover:shadow-indigo-600/30 transition-all duration-300 overflow-hidden text-left"
+                                        >
+                                            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity transform group-hover:scale-110 duration-500">
+                                                <Briefcase size={80} />
+                                            </div>
+                                            <div className="relative z-10">
+                                                <div className="bg-white/20 w-12 h-12 rounded-xl flex items-center justify-center mb-4 backdrop-blur-sm">
+                                                    <Plus size={24} className="text-white" />
+                                                </div>
+                                                <h3 className="text-lg font-bold text-white mb-1">Novo Projeto</h3>
+                                                <p className="text-indigo-100 text-sm opacity-80">Cadastrar novo trabalho</p>
+                                            </div>
+                                        </button>
+
+                                        <button
+                                            onClick={() => { setFormData({}); setIsClientModalOpen(true); }}
+                                            className="group relative p-6 bg-slate-800 hover:bg-slate-750 rounded-2xl border border-slate-700 hover:border-slate-600 transition-all duration-300 text-left"
+                                        >
+                                            <div className="flex items-center gap-4">
+                                                <div className="bg-slate-700 w-12 h-12 rounded-xl flex items-center justify-center group-hover:bg-slate-600 transition-colors">
+                                                    <Users size={24} className="text-slate-300" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="text-lg font-bold text-slate-200 group-hover:text-white transition-colors">Novo Cliente</h3>
+                                                    <p className="text-slate-500 text-sm">Adicionar à base</p>
+                                                </div>
+                                            </div>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* VIEW: CLIENTS */}
+                    {view === 'clients' && (
+                        <div className="pb-20 md:pb-0">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+                                <div>
+                                    <h1 className="text-3xl font-bold text-white tracking-tight">Clientes</h1>
+                                    <p className="text-slate-400 mt-1">Gerencie sua base de contatos e empresas.</p>
+                                </div>
+                                <button
+                                    onClick={() => { setFormData({}); setIsClientModalOpen(true); }}
+                                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 font-medium"
+                                >
+                                    <Plus size={20} /> Adicionar Cliente
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {clients.map(client => (
+                                    <div key={client.id} className="bg-slate-900/50 backdrop-blur-sm p-6 rounded-2xl border border-slate-800 hover:border-indigo-500/30 transition-all duration-300 group relative overflow-hidden">
+                                        <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none group-hover:bg-indigo-500/10 transition-colors"></div>
+
+                                        <div className="flex justify-between items-start mb-6 relative z-10">
+                                            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-700 flex items-center justify-center text-xl font-bold text-white shadow-inner border border-slate-600/50">
+                                                {client.name.charAt(0).toUpperCase()}
+                                            </div>
+                                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all duration-200 transform translate-x-4 group-hover:translate-x-0">
+                                                <button onClick={() => { setFormData(client); setIsClientModalOpen(true); }} className="p-2 text-slate-400 hover:bg-indigo-500/10 hover:text-indigo-400 rounded-lg transition-colors">
+                                                    <Edit size={18} />
+                                                </button>
+                                                <button onClick={() => handleDeleteClient(client.id)} className="p-2 text-slate-400 hover:bg-red-500/10 hover:text-red-400 rounded-lg transition-colors">
+                                                    <Trash2 size={18} />
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="relative z-10">
+                                            <h3 className="text-xl font-bold text-white mb-1 truncate">{client.name}</h3>
+                                            <p className="text-sm text-indigo-400 mb-6 font-medium inline-block bg-indigo-500/10 px-3 py-1 rounded-lg border border-indigo-500/20">
+                                                {client.company || 'Pessoa Física'}
+                                            </p>
+
+                                            <div className="space-y-3">
+                                                <a href={`https://wa.me/55${client.phone.replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="flex items-center gap-3 text-slate-400 hover:text-emerald-400 transition-colors p-2 hover:bg-emerald-500/5 rounded-lg -mx-2">
+                                                    <div className="p-1.5 bg-slate-800 rounded-md text-emerald-500">
+                                                        <MessageCircle size={16} />
+                                                    </div>
+                                                    <span className="font-medium">{client.phone}</span>
+                                                </a>
+                                                <div className="flex items-center gap-3 text-slate-400 p-2 -mx-2">
+                                                    <div className="p-1.5 bg-slate-800 rounded-md text-slate-500">
+                                                        <span className="font-bold text-xs">@</span>
+                                                    </div>
+                                                    <span className="truncate text-sm">{client.email || 'Sem email'}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {clients.length === 0 && (
+                                    <div className="col-span-full flex flex-col items-center justify-center py-24 text-slate-500 bg-slate-900/30 rounded-3xl border border-dashed border-slate-800">
+                                        <Users size={48} className="mb-4 opacity-20" />
+                                        <p>Nenhum cliente cadastrado.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* VIEW: PROJECTS */}
+                    {view === 'projects' && (
+                        <div className="pb-20 md:pb-0">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+                                <div>
+                                    <h1 className="text-3xl font-bold text-white tracking-tight">Projetos</h1>
+                                    <p className="text-slate-400 mt-1">Acompanhe o progresso e faturamento.</p>
+                                </div>
+                                <button
+                                    onClick={() => { setFormData({}); setIsProjectModalOpen(true); }}
+                                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 font-medium"
+                                >
+                                    <Plus size={20} /> Novo Projeto
+                                </button>
+                            </div>
+
+                            <div className="space-y-6">
+                                {projects.map(project => (
+                                    <div key={project.id} className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800 overflow-hidden hover:border-indigo-500/30 transition-all duration-300 shadow-lg">
+                                        <div className="p-6 md:p-8 border-b border-slate-800/50 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                                            <div className="flex-1">
+                                                <div className="flex flex-wrap items-center gap-3 mb-3">
+                                                    <h3 className="text-xl md:text-2xl font-bold text-white">{project.name}</h3>
+                                                    <span className={`px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider border ${project.status === 'Ativo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                                                        project.status === 'Pendente' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                                                            project.status === 'Atrasado' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' :
+                                                                'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                                                        }`}>
+                                                        {project.status}
+                                                    </span>
+                                                    <span className="px-3 py-1 bg-slate-800 text-slate-400 rounded-lg text-xs font-bold border border-slate-700 uppercase tracking-wider">
+                                                        {project.type === 'mensal' ? 'Recorrente' : 'Único'}
+                                                    </span>
+                                                </div>
+                                                <p className="text-slate-400 text-sm flex items-center gap-2 font-medium">
+                                                    <Users size={16} className="text-indigo-500" /> {project.clientName}
+                                                </p>
+                                            </div>
+
+                                            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6 bg-slate-800/30 p-4 rounded-xl border border-slate-700/30">
+                                                <div className="flex w-full sm:w-auto justify-between sm:justify-end gap-8">
+                                                    <div className="text-left sm:text-right">
+                                                        <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Vencimento</div>
+                                                        <div className="font-bold text-slate-200">{formatDate(project.dueDate)}</div>
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <div className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Valor</div>
+                                                        <div className="font-mono font-bold text-indigo-400 text-xl">{formatCurrency(project.value)}</div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex w-full sm:w-auto gap-2 pt-2 sm:pt-0 sm:pl-6 sm:border-l border-slate-700">
+                                                    <button
+                                                        onClick={() => setSelectedProject(project)}
+                                                        className="bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/20 font-medium text-sm"
+                                                    >
+                                                        <LayoutDashboard size={18} /> <span>Detalhes</span>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleSendWhatsApp(project)}
+                                                        className="flex-1 sm:flex-none bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20 font-medium text-sm"
+                                                        title="Enviar fatura por WhatsApp"
+                                                    >
+                                                        <MessageCircle size={18} /> <span>Cobrar</span>
+                                                    </button>
+                                                    <div className="flex gap-1">
+                                                        <button
+                                                            onClick={() => { setFormData(project); setIsProjectModalOpen(true); }}
+                                                            className="p-2.5 text-slate-400 hover:bg-slate-700 hover:text-white rounded-lg border border-slate-700 bg-slate-800 transition-colors"
+                                                        >
+                                                            <Edit size={18} />
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDeleteProject(project.id)}
+                                                            className="p-2.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-400 rounded-lg border border-slate-700 bg-slate-800 transition-colors"
+                                                        >
+                                                            <Trash2 size={18} />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Tasks Section */}
+                                        <div className="p-6 md:p-8 bg-slate-950/30">
+                                            <div className="mb-4 flex justify-between items-center">
+                                                <h4 className="font-bold text-slate-400 text-xs uppercase tracking-widest flex items-center gap-2">
+                                                    <CheckSquare size={14} className="text-indigo-500" /> Tarefas & Pendências
+                                                </h4>
+                                                <span className="text-xs font-bold bg-slate-800 text-slate-300 px-3 py-1 rounded-full border border-slate-700">
+                                                    {project.tasks?.filter(t => t.done).length || 0} / {project.tasks?.length || 0}
+                                                </span>
+                                            </div>
+
+                                            <div className="space-y-2 mb-6">
+                                                {project.tasks && project.tasks.map((task, idx) => (
+                                                    <label key={idx} className="flex items-start gap-4 p-4 bg-slate-800/40 rounded-xl border border-slate-700/50 hover:border-indigo-500/30 cursor-pointer transition-all group">
+                                                        <div className="relative flex items-center">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={task.done}
+                                                                onChange={() => handleTaskToggle(project, idx)}
+                                                                className="peer appearance-none w-5 h-5 border-2 border-slate-600 rounded bg-slate-800 checked:bg-indigo-500 checked:border-indigo-500 transition-colors cursor-pointer"
+                                                            />
+                                                            <CheckSquare size={12} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 peer-checked:opacity-100 pointer-events-none transition-opacity" />
+                                                        </div>
+                                                        <span className={`text-sm font-medium leading-tight pt-0.5 transition-colors ${task.done ? 'text-slate-500 line-through decoration-slate-600' : 'text-slate-300 group-hover:text-white'}`}>
+                                                            {task.desc}
+                                                        </span>
+                                                    </label>
+                                                ))}
+                                                {(!project.tasks || project.tasks.length === 0) && (
+                                                    <p className="text-sm text-slate-600 italic pl-1">Nenhuma tarefa registrada para este projeto.</p>
+                                                )}
+                                            </div>
+
+                                            <div className="flex gap-3">
+                                                <input
+                                                    type="text"
+                                                    placeholder="Adicionar nova tarefa..."
+                                                    className="flex-1 text-sm bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            handleAddTask(project, e.target.value);
+                                                            e.target.value = '';
+                                                        }
+                                                    }}
+                                                />
+                                                <button className="bg-slate-800 hover:bg-slate-700 text-white text-sm font-bold px-6 rounded-xl border border-slate-700 transition-colors">
+                                                    Adicionar
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {projects.length === 0 && (
+                                    <div className="flex flex-col items-center justify-center py-24 text-slate-500 bg-slate-900/30 rounded-3xl border border-dashed border-slate-800">
+                                        <Briefcase size={48} className="mb-4 opacity-20" />
+                                        <p>Nenhum projeto criado.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </main>
+
+            {/* --- MODALS --- */}
+
+            {/* Client Modal */}
+            {isClientModalOpen && (
+                <Modal onClose={() => setIsClientModalOpen(false)} title={formData.id ? 'Editar Cliente' : 'Novo Cliente'}>
+                    <form onSubmit={handleSaveClient} className="space-y-5">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-400 mb-2">Nome Completo</label>
+                            <input required type="text" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.name || ''} onChange={e => setFormData({ ...formData, name: e.target.value })} />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-400 mb-2">Empresa (Opcional)</label>
+                            <input type="text" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.company || ''} onChange={e => setFormData({ ...formData, company: e.target.value })} />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">WhatsApp/Telefone</label>
+                                <input required type="text" placeholder="11999999999" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.phone || ''} onChange={e => setFormData({ ...formData, phone: e.target.value })} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Email</label>
+                                <input type="email" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.email || ''} onChange={e => setFormData({ ...formData, email: e.target.value })} />
+                            </div>
+                        </div>
+                        <button type="submit" className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold hover:bg-indigo-500 mt-4 shadow-lg shadow-indigo-900/40 transition-all active:scale-[0.98]">Salvar Cliente</button>
+                    </form>
+                </Modal>
+            )}
+
+            {/* Project Details Modal */}
+            {selectedProject && (
+                <ProjectDetailsModal
+                    project={selectedProject}
+                    onClose={() => setSelectedProject(null)}
+                    db={db}
+                    appId={appId}
+                    user={user}
+                />
+            )}
+
+            {/* Project Modal */}
+            {isProjectModalOpen && (
+                <Modal onClose={() => setIsProjectModalOpen(false)} title={formData.id ? 'Editar Projeto' : 'Novo Projeto'}>
+                    <form onSubmit={handleSaveProject} className="space-y-5">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-400 mb-2">Nome do Projeto</label>
+                            <input required type="text" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.name || ''} onChange={e => setFormData({ ...formData, name: e.target.value })} />
+                        </div>
+
+                        {!formData.id && (
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Cliente</label>
+                                <select required className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.clientId || ''} onChange={e => setFormData({ ...formData, clientId: e.target.value })}>
+                                    <option value="">Selecione um cliente...</option>
+                                    {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Valor (R$)</label>
+                                <input required type="number" step="0.01" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.value || ''} onChange={e => setFormData({ ...formData, value: e.target.value })} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Vencimento</label>
+                                <input required type="date" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.dueDate || ''} onChange={e => setFormData({ ...formData, dueDate: e.target.value })} />
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Tipo de Cobrança</label>
+                                <select className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.type || 'mensal'} onChange={e => setFormData({ ...formData, type: e.target.value })}>
+                                    <option value="mensal">Recorrente (Mensal)</option>
+                                    <option value="unico">À Vista / Único</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-400 mb-2">Status</label>
+                                <select className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" value={formData.status || 'Ativo'} onChange={e => setFormData({ ...formData, status: e.target.value })}>
+                                    <option value="Ativo">Ativo</option>
+                                    <option value="Pendente">Pendente</option>
+                                    <option value="Concluído">Concluído</option>
+                                    <option value="Atrasado">Atrasado</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-slate-400 mb-2">Descrição / Obs</label>
+                            <textarea className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" rows="3" value={formData.description || ''} onChange={e => setFormData({ ...formData, description: e.target.value })}></textarea>
+                        </div>
+
+                        <button type="submit" className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold hover:bg-indigo-500 mt-2 shadow-lg shadow-indigo-900/40 transition-all active:scale-[0.98]">Salvar Projeto</button>
+                    </form>
+                </Modal>
+            )}
+
+        </div>
+    );
+}
+
+// Helper Components
+const StatCard = ({ title, value, icon, trend, color, iconBg }) => (
+    <div className={`p-6 rounded-3xl border bg-gradient-to-br ${color} relative overflow-hidden group`}>
+        <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+            {icon}
+        </div>
+        <div className="flex justify-between items-start mb-4 relative z-10">
+            <div>
+                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">{title}</p>
+                <h3 className="text-2xl md:text-3xl font-bold text-white tracking-tight">{value}</h3>
+            </div>
+            <div className={`p-3 rounded-xl ${iconBg} shadow-inner`}>
+                {icon}
+            </div>
+        </div>
+        {trend && (
+            <div className="text-xs font-medium text-slate-400 bg-slate-900/30 inline-block px-2 py-1 rounded-lg border border-slate-800/50">
+                {trend}
+            </div>
+        )}
+    </div>
+);
+
+const NavButton = ({ active, onClick, icon, label }) => (
+    <button
+        onClick={onClick}
+        className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all duration-200 font-medium text-sm group ${active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/40' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}`}
+    >
+        <span className={`${active ? 'text-white' : 'text-slate-500 group-hover:text-indigo-400 transition-colors'}`}>{icon}</span>
+        {label}
+        {active && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-white shadow-sm"></div>}
+    </button>
+);
+
+const MobileNavButton = ({ active, onClick, icon }) => (
+    <button
+        onClick={onClick}
+        className={`p-2.5 rounded-lg transition-all ${active ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+    >
+        {icon}
+    </button>
+);
+
+const Modal = ({ onClose, title, children }) => (
+    <div className="fixed inset-0 bg-slate-950/80 z-50 flex items-end sm:items-center justify-center sm:p-4 backdrop-blur-sm">
+        <div className="bg-slate-800 w-full sm:max-w-lg shadow-2xl animate-in slide-in-from-bottom-10 sm:zoom-in duration-200 flex flex-col max-h-[90vh] sm:rounded-3xl rounded-t-3xl border border-slate-700">
+            <div className="flex justify-between items-center p-6 border-b border-slate-700 flex-shrink-0">
+                <h3 className="text-xl font-bold text-white">{title}</h3>
+                <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-400 hover:text-white transition-colors">
+                    <X size={20} />
+                </button>
+            </div>
+            <div className="p-6 overflow-y-auto custom-scrollbar">
+                {children}
+            </div>
+        </div>
+    </div>
+);
+
+const TabButton = ({ active, onClick, icon, label }) => (
+    <button
+        onClick={onClick}
+        className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+    >
+        {icon} {label}
+    </button>
+);
+
+const ProjectDetailsModal = ({ project, onClose, db, appId, user }) => {
+    const [activeTab, setActiveTab] = useState('overview');
+    const [payments, setPayments] = useState([]);
+    const [updates, setUpdates] = useState([]);
+    const [newPayment, setNewPayment] = useState({ value: '', date: '', note: '' });
+    const [newUpdate, setNewUpdate] = useState('');
+
+    useEffect(() => {
+        if (!project || !user) return;
+
+        const paymentsQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id, 'payments'), orderBy('date', 'desc'));
+        const unsubPayments = onSnapshot(paymentsQuery, (snapshot) => {
+            setPayments(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+
+        const updatesQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id, 'updates'), orderBy('createdAt', 'desc'));
+        const unsubUpdates = onSnapshot(updatesQuery, (snapshot) => {
+            setUpdates(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+
+        return () => {
+            unsubPayments();
+            unsubUpdates();
+        };
+    }, [project, user]);
+
+    const handleAddPayment = async (e) => {
+        e.preventDefault();
+        if (!newPayment.value || !newPayment.date) return;
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id, 'payments'), {
+            value: parseFloat(newPayment.value),
+            date: newPayment.date,
+            note: newPayment.note,
+            createdAt: serverTimestamp()
+        });
+
+        // Update project total paid
+        const currentTotal = payments.reduce((acc, curr) => acc + (curr.value || 0), 0);
+        const newTotal = currentTotal + parseFloat(newPayment.value);
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id), {
+            totalPaid: newTotal
+        });
+
+        setNewPayment({ value: '', date: '', note: '' });
+    };
+
+    const handleDeletePayment = async (id) => {
+        if (!confirm('Remover este pagamento?')) return;
+
+        const paymentToDelete = payments.find(p => p.id === id);
+        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id, 'payments', id));
+
+        if (paymentToDelete) {
+            const currentTotal = payments.reduce((acc, curr) => acc + (curr.value || 0), 0);
+            const newTotal = Math.max(0, currentTotal - (paymentToDelete.value || 0));
+            await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id), {
+                totalPaid: newTotal
+            });
+        }
+    };
+
+    const handleAddUpdate = async (e) => {
+        e.preventDefault();
+        if (!newUpdate.trim()) return;
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'projects', project.id, 'updates'), {
+            text: newUpdate,
+            createdAt: serverTimestamp()
+        });
+        setNewUpdate('');
+    };
+
+    const totalPaid = payments.reduce((acc, curr) => acc + (curr.value || 0), 0);
+    const progress = Math.min((totalPaid / (project.value || 1)) * 100, 100);
+
+    return (
+        <div className="fixed inset-0 bg-slate-950/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+            <div className="bg-slate-900 w-full max-w-4xl h-[85vh] rounded-3xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden animate-in zoom-in duration-200">
+
+                {/* Header */}
+                <div className="p-6 border-b border-slate-800 flex justify-between items-start bg-slate-900/50">
+                    <div>
+                        <div className="flex items-center gap-3 mb-2">
+                            <h2 className="text-2xl font-bold text-white">{project.name}</h2>
+                            <span className={`px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider border ${project.status === 'Ativo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                                project.status === 'Pendente' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                                    'bg-slate-700 text-slate-400 border-slate-600'
+                                }`}>
+                                {project.status}
+                            </span>
+                        </div>
+                        <p className="text-slate-400 flex items-center gap-2">
+                            <Users size={16} className="text-indigo-500" /> {project.clientName}
+                        </p>
+                    </div>
+                    <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition-colors">
+                        <X size={24} />
+                    </button>
+                </div>
+
+                {/* Tabs */}
+                <div className="px-6 pt-4 border-b border-slate-800 flex gap-2 bg-slate-900/50">
+                    <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} icon={<LayoutDashboard size={18} />} label="Visão Geral" />
+                    <TabButton active={activeTab === 'financials'} onClick={() => setActiveTab('financials')} icon={<DollarSign size={18} />} label="Financeiro" />
+                    <TabButton active={activeTab === 'timeline'} onClick={() => setActiveTab('timeline')} icon={<Calendar size={18} />} label="Timeline" />
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 overflow-y-auto p-6 bg-slate-950/50 custom-scrollbar">
+
+                    {activeTab === 'overview' && (
+                        <div className="space-y-8">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <div className="p-5 bg-slate-800/50 rounded-2xl border border-slate-700/50">
+                                    <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Valor Total</div>
+                                    <div className="text-2xl font-mono font-bold text-white">{formatCurrency(project.value)}</div>
+                                </div>
+                                <div className="p-5 bg-slate-800/50 rounded-2xl border border-slate-700/50">
+                                    <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Total Recebido</div>
+                                    <div className="text-2xl font-mono font-bold text-emerald-400">{formatCurrency(totalPaid)}</div>
+                                </div>
+                                <div className="p-5 bg-slate-800/50 rounded-2xl border border-slate-700/50">
+                                    <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Pendente</div>
+                                    <div className="text-2xl font-mono font-bold text-rose-400">{formatCurrency(project.value - totalPaid)}</div>
+                                </div>
+                            </div>
+
+                            <div className="bg-slate-800/30 p-6 rounded-2xl border border-slate-700/50">
+                                <h3 className="text-lg font-bold text-white mb-4">Progresso Financeiro</h3>
+                                <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
+                                    <div className="bg-gradient-to-r from-indigo-500 to-emerald-500 h-full rounded-full transition-all duration-500" style={{ width: `${progress}%` }}></div>
+                                </div>
+                                <div className="flex justify-between mt-2 text-sm text-slate-400 font-medium">
+                                    <span>0%</span>
+                                    <span>{progress.toFixed(0)}% Recebido</span>
+                                    <span>100%</span>
+                                </div>
+                            </div>
+
+                            <div className="bg-slate-800/30 p-6 rounded-2xl border border-slate-700/50">
+                                <h3 className="text-lg font-bold text-white mb-4">Descrição do Projeto</h3>
+                                <p className="text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                    {project.description || "Nenhuma descrição fornecida."}
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'financials' && (
+                        <div className="space-y-6">
+                            <div className="flex flex-col md:flex-row gap-6">
+                                <div className="flex-1 space-y-4">
+                                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                        <DollarSign size={20} className="text-emerald-400" /> Histórico de Pagamentos
+                                    </h3>
+                                    <div className="space-y-3">
+                                        {payments.map(payment => (
+                                            <div key={payment.id} className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl border border-slate-700/50 hover:border-emerald-500/30 transition-colors group">
+                                                <div>
+                                                    <div className="font-bold text-emerald-400 font-mono text-lg">{formatCurrency(payment.value)}</div>
+                                                    <div className="text-sm text-slate-500">{formatDate(payment.date)} • {payment.note || 'Sem nota'}</div>
+                                                </div>
+                                                <button onClick={() => handleDeletePayment(payment.id)} className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all">
+                                                    <Trash2 size={18} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {payments.length === 0 && (
+                                            <div className="text-center py-10 text-slate-500 bg-slate-800/20 rounded-xl border border-dashed border-slate-700">
+                                                Nenhum pagamento registrado.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="w-full md:w-80">
+                                    <div className="bg-slate-800/50 p-6 rounded-2xl border border-slate-700/50 sticky top-0">
+                                        <h3 className="text-lg font-bold text-white mb-4">Registrar Pagamento</h3>
+                                        <form onSubmit={handleAddPayment} className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-400 mb-1">Valor</label>
+                                                <input required type="number" step="0.01" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none" value={newPayment.value} onChange={e => setNewPayment({ ...newPayment, value: e.target.value })} />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-400 mb-1">Data</label>
+                                                <input required type="date" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none" value={newPayment.date} onChange={e => setNewPayment({ ...newPayment, date: e.target.value })} />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-400 mb-1">Nota (Opcional)</label>
+                                                <input type="text" className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none" value={newPayment.note} onChange={e => setNewPayment({ ...newPayment, note: e.target.value })} />
+                                            </div>
+                                            <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-emerald-900/20">
+                                                Adicionar Pagamento
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'timeline' && (
+                        <div className="space-y-6">
+                            <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50">
+                                <form onSubmit={handleAddUpdate} className="flex gap-4">
+                                    <input
+                                        type="text"
+                                        placeholder="Adicionar uma atualização ou nota sobre o projeto..."
+                                        className="flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                        value={newUpdate}
+                                        onChange={e => setNewUpdate(e.target.value)}
+                                    />
+                                    <button type="submit" className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 rounded-xl font-bold transition-colors">
+                                        Postar
+                                    </button>
+                                </form>
+                            </div>
+
+                            <div className="relative pl-8 space-y-8 before:content-[''] before:absolute before:left-3 before:top-0 before:bottom-0 before:w-0.5 before:bg-slate-800">
+                                {updates.map(update => (
+                                    <div key={update.id} className="relative">
+                                        <div className="absolute -left-[34px] top-1 w-7 h-7 rounded-full bg-slate-800 border-4 border-slate-900 flex items-center justify-center">
+                                            <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
+                                        </div>
+                                        <div className="bg-slate-800/30 p-4 rounded-xl border border-slate-700/50">
+                                            <p className="text-slate-300 mb-2">{update.text}</p>
+                                            <div className="text-xs text-slate-500 font-medium">
+                                                {update.createdAt?.seconds ? new Date(update.createdAt.seconds * 1000).toLocaleString('pt-BR') : 'Agora'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {updates.length === 0 && (
+                                    <div className="text-slate-500 italic">Nenhuma atualização registrada.</div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
